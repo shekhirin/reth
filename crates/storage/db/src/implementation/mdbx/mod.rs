@@ -349,6 +349,27 @@ mod tests {
     }
 
     #[test]
+    fn db_cursor_append_with_gap() {
+        let db: Arc<Env<WriteMap>> = test_utils::create_test_db(EnvKind::RW);
+
+        // PUT
+        let tx = db.tx_mut().expect(ERROR_INIT_TX);
+        vec![0, 1, 3, 4, 5]
+            .into_iter()
+            .try_for_each(|key| tx.put::<CanonicalHeaders>(key, H256::zero()))
+            .expect(ERROR_PUT);
+        tx.commit().expect(ERROR_COMMIT);
+
+        // APPEND
+        let tx = db.tx_mut().expect(ERROR_INIT_TX);
+        let mut cursor = tx.cursor_write::<CanonicalHeaders>().unwrap();
+        cursor.seek_exact(2).unwrap();
+        cursor.append(2, H256::zero()).unwrap();
+        cursor.append(6, H256::zero()).unwrap();
+        //assert_eq!(cursor.current(), Ok(Some((5, H256::zero())))); // the end of table
+    }
+
+    #[test]
     fn db_closure_put_get() {
         let path = TempDir::new().expect(test_utils::ERROR_TEMPDIR).into_path();
 
