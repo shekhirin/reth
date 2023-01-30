@@ -154,30 +154,21 @@ mod tests {
 
     const EXTENSION: &str = "toml";
 
-    fn with_tempdir(filename: &str, proc: fn(&std::path::Path)) {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_path = temp_dir.path().join(filename).with_extension(EXTENSION);
-
-        proc(&config_path);
-
-        temp_dir.close().unwrap()
-    }
-
     #[test]
     fn test_store_config() {
-        with_tempdir("config-store-test", |config_path| {
-            let config = Config::default();
-            confy::store_path(config_path, config).unwrap();
-        })
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config-store-test").with_extension(EXTENSION);
+        let config = Config::default();
+        confy::store_path(config_path, config).unwrap();
     }
 
     #[test]
     fn test_load_config() {
-        with_tempdir("config-load-test", |config_path| {
-            let config = Config::default();
-            confy::store_path(config_path, &config).unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config-load-test").with_extension(EXTENSION);
+        let config = Config::default();
+        confy::store_path(&config_path, &config).unwrap();
 
-            let _: Config = confy::load_path(config_path).unwrap();
-        })
+        let _: Config = confy::load_path(config_path).unwrap();
     }
 }
