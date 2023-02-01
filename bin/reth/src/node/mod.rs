@@ -181,7 +181,7 @@ impl Command {
         &self,
         config: &Config,
         db: &Arc<Env<WriteMap>>,
-    ) -> NetworkConfig<ShareableDatabase<Env<WriteMap>>> {
+    ) -> NetworkConfig<ShareableDatabase<Arc<Env<WriteMap>>>> {
         config.network_config(
             db.clone(),
             self.chain.clone(),

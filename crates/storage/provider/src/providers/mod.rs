@@ -6,7 +6,6 @@ use reth_db::{
 };
 use reth_interfaces::Result;
 use reth_primitives::{rpc::BlockId, Block, BlockHash, BlockNumber, ChainInfo, Header, H256, U256};
-use std::sync::Arc;
 
 mod historical;
 pub use historical::{HistoricalStateProvider, HistoricalStateProviderRef};
@@ -19,12 +18,12 @@ pub use latest::{LatestStateProvider, LatestStateProviderRef};
 /// This provider implements most provider or provider factory traits.
 pub struct ShareableDatabase<DB: Database> {
     /// Database
-    db: Arc<DB>,
+    db: DB,
 }
 
 impl<DB: Database> ShareableDatabase<DB> {
     /// create new database provider
-    pub fn new(db: Arc<DB>) -> Self {
+    pub fn new(db: DB) -> Self {
         Self { db }
     }
 }
