@@ -2,7 +2,7 @@
 //!
 //! Starts the client
 use crate::{
-    dirs::{ConfigPath, DbPath, PlatformPath},
+    dirs::{ConfigPath, DbPath, KnownPeersPath, PlatformPath},
     prometheus_exporter,
     utils::{chainspec::chain_spec_value_parser, init::init_db, parse_socket_address},
     NetworkOpts,
@@ -13,10 +13,11 @@ use fdlimit::raise_fd_limit;
 use futures::{stream::select as stream_select, Stream, StreamExt};
 use reth_consensus::beacon::BeaconConsensus;
 use reth_db::mdbx::{Env, WriteMap};
+use reth_discv4::NodeRecord;
 use reth_downloaders::{bodies, headers};
 use reth_interfaces::consensus::{Consensus, ForkchoiceState};
 use reth_net_nat::NatResolver;
-use reth_network::{FetchClient, NetworkConfig, NetworkEvent, NetworkHandle};
+use reth_network::{FetchClient, NetworkConfig, NetworkEvent, NetworkHandle, PeerInfo};
 use reth_network_api::NetworkInfo;
 use reth_primitives::{BlockNumber, ChainSpec, H256};
 use reth_provider::ShareableDatabase;
@@ -27,7 +28,6 @@ use reth_stages::{
     stages::{ExecutionStage, SenderRecoveryStage, TotalDifficultyStage},
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tokio::select;
 use tracing::{debug, info, warn};
 
 /// Start the node
@@ -46,6 +46,11 @@ pub struct Command {
     /// - macOS: `$HOME/Library/Application Support/reth/db`
     #[arg(long, value_name = "PATH", verbatim_doc_comment, default_value_t)]
     db: PlatformPath<DbPath>,
+
+    /// The path to the known peers file. Connected peers are
+    /// dumped to this file on node shutdown, and read on startup.
+    #[arg(long, value_name = "FILE", verbatim_doc_comment, default_value_t)]
+    known: PlatformPath<KnownPeersPath>,
 
     /// The chain this node is running.
     ///
@@ -139,7 +144,12 @@ impl Command {
 
         // Run pipeline
         info!(target: "reth::cli", "Starting sync pipeline");
-        pipeline.run(db.clone()).await?;
+        tokio::select! {
+            res = pipeline.run(db.clone()) => res?,
+            _ = tokio::signal::ctrl_c() => {},
+        };
+
+        dump_peers(network.to_owned(), self.known.to_owned()).await?;
 
         info!(target: "reth::cli", "Finishing up");
         Ok(())
@@ -285,6 +295,22 @@ impl Command {
     }
 }
 
+// Dumps peers to `file_path` for persistence.
+async fn dump_peers(
+    network: NetworkHandle,
+    file_path: PlatformPath<KnownPeersPath>,
+) -> Result<(), eyre::Error> {
+    let writer = std::io::BufWriter::new(std::fs::File::create(file_path)?);
+    let known_peers: Vec<NodeRecord> = network
+        .get_peers()
+        .await?
+        .into_iter()
+        .map(|PeerInfo { remote_id, remote_addr, .. }| NodeRecord::new(remote_addr, remote_id))
+        .collect();
+    serde_json::to_writer_pretty(writer, &known_peers)?;
+    Ok(())
+}
+
 /// The current high-level state of the node.
 #[derive(Default)]
 struct NodeState {
@@ -324,7 +350,7 @@ async fn handle_events(mut events: impl Stream<Item = NodeEvent> + Unpin) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        select! {
+        tokio::select! {
             Some(event) = events.next() => {
                 match event {
                     NodeEvent::Network(NetworkEvent::SessionEstablished { peer_id, status, .. }) => {
