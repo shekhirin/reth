@@ -462,6 +462,7 @@ where
 
     /// Starts a request future
     fn submit_request(&mut self, request: HeadersRequest, priority: Priority) {
+        self.metrics.in_flight_requests.increment(1.);
         self.in_progress_queue.push(self.request_fut(request, priority));
     }
 
@@ -628,6 +629,7 @@ where
         loop {
             // poll requests
             while let Poll::Ready(Some(outcome)) = this.in_progress_queue.poll_next_unpin(cx) {
+                this.metrics.in_flight_requests.decrement(1.);
                 // handle response
                 if let Err(err) = this.on_headers_outcome(outcome) {
                     this.on_headers_error(err);

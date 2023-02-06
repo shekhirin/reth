@@ -309,6 +309,7 @@ where
                         .ok_or(DownloadError::MissingHeader { block_number: *range.start() })?;
 
                     // Dispatch contiguous request.
+                    self.metrics.in_flight_requests.increment(1.);
                     self.in_progress_queue.push_new_request(
                         Arc::clone(&self.client),
                         Arc::clone(&self.consensus),
@@ -350,6 +351,10 @@ where
             // Poll requests
             while let Poll::Ready(Some(response)) = this.in_progress_queue.poll_next_unpin(cx) {
                 let response = OrderedBodiesResponse(response);
+                this.metrics.in_flight_requests.decrement(1.);
+                this.metrics.buffered_responses.increment(
+                    (response.block_range().end() - response.block_range().start()) as f64,
+                );
                 this.buffered_responses.push(response);
             }
 
@@ -362,6 +367,7 @@ where
             {
                 match this.next_headers_request() {
                     Ok(Some(request)) => {
+                        this.metrics.in_flight_requests.increment(1.);
                         this.in_progress_queue.push_new_request(
                             Arc::clone(&this.client),
                             Arc::clone(&this.consensus),
@@ -387,6 +393,7 @@ where
             if this.queued_bodies.len() >= this.stream_batch_size {
                 let next_batch = this.queued_bodies.drain(..this.stream_batch_size);
                 this.metrics.total_flushed.increment(next_batch.len() as u64);
+                this.metrics.buffered_responses.decrement(next_batch.len() as f64);
                 return Poll::Ready(Some(Ok(next_batch.collect())))
             }
 

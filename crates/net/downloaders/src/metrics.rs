@@ -1,5 +1,5 @@
-use metrics::Counter;
-use reth_interfaces::p2p::error::DownloadError;
+use metrics::{counter, Counter, Gauge};
+use reth_interfaces::p2p::error::{DownloadError, RequestError};
 use reth_metrics_derive::Metrics;
 
 /// Common downloader metrics.
@@ -22,23 +22,35 @@ pub struct DownloaderMetrics {
     pub total_flushed: Counter,
     /// Number of items that were successfully downloaded
     pub total_downloaded: Counter,
-    /// Number of timeout errors while requesting items
-    pub timeout_errors: Counter,
-    /// Number of validation errors while requesting items
-    pub validation_errors: Counter,
-    /// Number of unexpected errors while requesting items
-    pub unexpected_errors: Counter,
+    /// The number of in-flight requests
+    pub in_flight_requests: Gauge,
+    /// The number of buffered responses
+    pub buffered_responses: Gauge,
 }
 
 impl DownloaderMetrics {
     /// Increment errors counter.
     pub fn increment_errors(&self, error: &DownloadError) {
-        match error {
-            DownloadError::Timeout => self.timeout_errors.increment(1),
+        let label = match error {
+            DownloadError::Timeout => "timeout",
             DownloadError::HeaderValidation { .. } | DownloadError::BodyValidation { .. } => {
-                self.validation_errors.increment(1)
+                "validation"
             }
-            _error => self.unexpected_errors.increment(1),
-        }
+            DownloadError::TooManyBodies { .. } | DownloadError::HeadersResponseTooShort { .. } => {
+                "length"
+            }
+            DownloadError::DatabaseError(_) => "db",
+            DownloadError::EmptyResponse => "empty_response",
+            DownloadError::RequestError(err) => match err {
+                RequestError::Timeout => "timeout",
+                RequestError::BadResponse => "bad_protocol_message",
+                RequestError::ConnectionDropped => "connection_dropped",
+                RequestError::ChannelClosed => "channel_closed",
+                RequestError::UnsupportedCapability => "unsupported_cap",
+            },
+            _error => "unexpected",
+        };
+
+        counter!("errors", 1, "type" => label);
     }
 }
