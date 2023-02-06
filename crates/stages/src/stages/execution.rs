@@ -10,12 +10,11 @@ use reth_db::{
     transaction::{DbTx, DbTxMut},
 };
 use reth_executor::{
-    executor::AccountChangeSet,
+    execution_result::AccountChangeSet,
     revm_wrap::{State, SubState},
 };
 use reth_primitives::{
-    Address, ChainSpec, Hardfork, Header, StorageEntry, TransactionSignedEcRecovered, H256,
-    MAINNET, U256,
+    Address, Block, ChainSpec, Hardfork, Header, StorageEntry, H256, MAINNET, U256,
 };
 use reth_provider::LatestStateProviderRef;
 use std::fmt::Debug;
@@ -104,8 +103,7 @@ impl<DB: Database> Stage<DB> for ExecutionStage {
 
         // get canonical blocks (num,hash)
         let canonical_batch = canonicals
-            .walk(start_block)?
-            .take_while(|entry| entry.as_ref().map(|e| e.0 <= end_block).unwrap_or_default())
+            .walk_range(start_block..end_block + 1)?
             .map(|i| i.map(BlockNumHash))
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -135,9 +133,9 @@ impl<DB: Database> Stage<DB> for ExecutionStage {
 
         // Fetch transactions, execute them and generate results
         let mut block_change_patches = Vec::with_capacity(canonical_batch.len());
-        for (header, body, ommers) in block_batch.iter() {
-            let num = header.number;
-            tracing::trace!(target: "sync::stages::execution", ?num, "Execute block.");
+        for (header, body, ommers) in block_batch.into_iter() {
+            let block_number = header.number;
+            tracing::trace!(target: "sync::stages::execution", ?block_number, "Execute block.");
             // iterate over all transactions
             let mut tx_walker = tx_cursor.walk(body.start_tx_id)?;
             let mut transactions = Vec::with_capacity(body.tx_count as usize);
@@ -146,7 +144,7 @@ impl<DB: Database> Stage<DB> for ExecutionStage {
                 let (tx_index, tx) =
                     tx_walker.next().ok_or(DatabaseIntegrityError::EndOfTransactionTable)??;
                 if tx_index != index {
-                    error!(target: "sync::stages::execution", block = header.number, expected = index, found = tx_index, ?body, "Transaction gap");
+                    error!(target: "sync::stages::execution", block = block_number, expected = index, found = tx_index, ?body, "Transaction gap");
                     return Err(DatabaseIntegrityError::TransactionsGap { missing: tx_index }.into())
                 }
                 transactions.push(tx);
@@ -160,23 +158,15 @@ impl<DB: Database> Stage<DB> for ExecutionStage {
                     .next()
                     .ok_or(DatabaseIntegrityError::EndOfTransactionSenderTable)??;
                 if tx_index != index {
-                    error!(target: "sync::stages::execution", block = header.number, expected = index, found = tx_index, ?body, "Signer gap");
+                    error!(target: "sync::stages::execution", block = block_number, expected = index, found = tx_index, ?body, "Signer gap");
                     return Err(
                         DatabaseIntegrityError::TransactionsSignerGap { missing: tx_index }.into()
                     )
                 }
                 signers.push(tx);
             }
-            // create ecRecovered transaction by matching tx and its signer
-            let recovered_transactions: Vec<_> = transactions
-                .into_iter()
-                .zip(signers.into_iter())
-                .map(|(tx, signer)| {
-                    TransactionSignedEcRecovered::from_signed_transaction(tx, signer)
-                })
-                .collect();
 
-            trace!(target: "sync::stages::execution", number = header.number, txs = recovered_transactions.len(), "Executing block");
+            trace!(target: "sync::stages::execution", number = block_number, txs = transactions.len(), "Executing block");
 
             // For ethereum tests that has MAX gas that calls contract until max depth (1024 calls)
             // revm can take more then default allocated stack space. For this case we are using
@@ -189,9 +179,8 @@ impl<DB: Database> Stage<DB> for ExecutionStage {
                     .spawn_scoped(scope, || {
                         // execute and store output to results
                         reth_executor::executor::execute_and_verify_receipt(
-                            header,
-                            &recovered_transactions,
-                            ommers,
+                            &Block { header, body: transactions, ommers },
+                            Some(signers),
                             &self.chain_spec,
                             &mut state_provider,
                         )
@@ -199,8 +188,8 @@ impl<DB: Database> Stage<DB> for ExecutionStage {
                     .expect("Expects that thread name is not null");
                 handle.join().expect("Expects for thread to not panic")
             })
-            .map_err(|error| StageError::ExecutionError { block: header.number, error })?;
-            block_change_patches.push((changeset, num));
+            .map_err(|error| StageError::ExecutionError { block: block_number, error })?;
+            block_change_patches.push((changeset, block_number));
         }
 
         // Get last tx count so that we can know amount of transaction in the block.
@@ -348,10 +337,7 @@ impl<DB: Database> Stage<DB> for ExecutionStage {
         // get all batches for account change
         // Check if walk and walk_dup would do the same thing
         let account_changeset_batch = account_changeset
-            .walk(from_transition_rev)?
-            .take_while(|item| {
-                item.as_ref().map(|(num, _)| *num < to_transition_rev).unwrap_or_default()
-            })
+            .walk_range(from_transition_rev..to_transition_rev)?
             .collect::<Result<Vec<_>, _>>()?;
 
         // revert all changes to PlainState
@@ -365,12 +351,10 @@ impl<DB: Database> Stage<DB> for ExecutionStage {
 
         // get all batches for storage change
         let storage_changeset_batch = storage_changeset
-            .walk((from_transition_rev, Address::zero()).into())?
-            .take_while(|item| {
-                item.as_ref()
-                    .map(|(key, _)| key.transition_id() < to_transition_rev)
-                    .unwrap_or_default()
-            })
+            .walk_range(
+                (from_transition_rev, Address::zero()).into()..
+                    (to_transition_rev, Address::zero()).into(),
+            )?
             .collect::<Result<Vec<_>, _>>()?;
 
         // revert all changes to PlainStorage

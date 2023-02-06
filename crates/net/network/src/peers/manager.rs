@@ -2,14 +2,14 @@ use crate::{
     error::{BackoffKind, SessionError},
     peers::{
         reputation::{is_banned_reputation, BACKOFF_REPUTATION_CHANGE, DEFAULT_REPUTATION},
-        ReputationChangeWeights,
+        ReputationChangeWeights, DEFAULT_MAX_PEERS_INBOUND, DEFAULT_MAX_PEERS_OUTBOUND,
     },
     session::{Direction, PendingSessionHandshakeError},
 };
 use futures::StreamExt;
 use reth_eth_wire::{errors::EthStreamError, DisconnectReason};
 use reth_net_common::ban_list::BanList;
-use reth_network_api::ReputationChangeKind;
+use reth_network_api::{PeerKind, ReputationChangeKind};
 use reth_primitives::{ForkId, NodeRecord, PeerId};
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
@@ -163,7 +163,6 @@ impl PeersManager {
         if !self.connection_info.has_in_capacity() {
             return Err(InboundConnectionError::ExceedsLimit(self.connection_info.max_inbound))
         }
-
         // keep track of new connection
         self.connection_info.inc_in();
         Ok(())
@@ -658,7 +657,7 @@ impl Default for PeersManager {
 }
 
 /// Tracks stats about connected nodes
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConnectionInfo {
     /// Counter for currently occupied slots for active outbound connections.
@@ -713,7 +712,12 @@ impl ConnectionInfo {
 
 impl Default for ConnectionInfo {
     fn default() -> Self {
-        ConnectionInfo { num_outbound: 0, num_inbound: 0, max_outbound: 100, max_inbound: 30 }
+        ConnectionInfo {
+            num_outbound: 0,
+            num_inbound: 0,
+            max_outbound: DEFAULT_MAX_PEERS_OUTBOUND,
+            max_inbound: DEFAULT_MAX_PEERS_INBOUND,
+        }
     }
 }
 
@@ -860,16 +864,6 @@ impl PeerConnectionState {
     }
 }
 
-/// Represents the kind of peer
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub enum PeerKind {
-    /// Basic peer kind.
-    #[default]
-    Basic,
-    /// Trusted peer.
-    Trusted,
-}
-
 /// Commands the [`PeersManager`] listens for.
 pub(crate) enum PeerCommand {
     /// Command for manually add
@@ -917,7 +911,7 @@ pub enum PeerAction {
 }
 
 /// Config type for initiating a [`PeersManager`] instance
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PeersConfig {
     /// How often to recheck free slots for outbound connections.
@@ -1003,7 +997,7 @@ impl PeersConfig {
 /// The durations to use when a backoff should be applied to a peer.
 ///
 /// See also [`BackoffKind`](BackoffKind).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PeerBackoffDurations {
     /// Applies to connection problems where there is a chance that they will be resolved after the

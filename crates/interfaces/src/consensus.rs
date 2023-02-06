@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use reth_primitives::{BlockHash, BlockNumber, SealedBlock, SealedHeader, H256};
 use std::fmt::Debug;
-use tokio::sync::watch::{error::SendError, Receiver};
+use tokio::sync::watch::Receiver;
 
 /// Re-export fork choice state
 pub use reth_rpc_types::engine::ForkchoiceState;
@@ -12,12 +12,6 @@ pub use reth_rpc_types::engine::ForkchoiceState;
 pub trait Consensus: Debug + Send + Sync {
     /// Get a receiver for the fork choice state
     fn fork_choice_state(&self) -> Receiver<ForkchoiceState>;
-
-    /// Notifies all listeners of the latest [ForkchoiceState].
-    fn notify_fork_choice_state(
-        &self,
-        state: ForkchoiceState,
-    ) -> Result<(), SendError<ForkchoiceState>>;
 
     /// Validate if header is correct and follows consensus specification.
     ///
@@ -49,6 +43,8 @@ pub enum Error {
     HeaderGasUsedExceedsGasLimit { gas_used: u64, gas_limit: u64 },
     #[error("Block ommer hash ({got:?}) is different then expected: ({expected:?})")]
     BodyOmmersHashDiff { got: H256, expected: H256 },
+    #[error("Block state root ({got:?}) is different then expected: ({expected:?})")]
+    BodyStateRootDiff { got: H256, expected: H256 },
     #[error("Block transaction root ({got:?}) is different then expected: ({expected:?})")]
     BodyTransactionRootDiff { got: H256, expected: H256 },
     #[error("Block receipts root ({got:?}) is different then expected: ({expected:?}).")]

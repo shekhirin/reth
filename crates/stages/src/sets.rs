@@ -107,7 +107,6 @@ where
             .add_stage(HeaderStage::new(self.header_downloader, self.consensus.clone()))
             .add_stage(TotalDifficultyStage::default())
             .add_stage(BodyStage { downloader: self.body_downloader, consensus: self.consensus })
-            .add_stage(TransactionLookupStage::default())
     }
 }
 
@@ -165,10 +164,10 @@ pub struct HashingStages;
 impl<DB: Database> StageSet<DB> for HashingStages {
     fn builder(self) -> StageSetBuilder<DB> {
         StageSetBuilder::default()
-            .add_stage(MerkleStage::Unwind)
+            .add_stage(MerkleStage::default_unwind())
             .add_stage(AccountHashingStage::default())
             .add_stage(StorageHashingStage::default())
-            .add_stage(MerkleStage::Execution)
+            .add_stage(MerkleStage::default_execution())
     }
 }
 
@@ -180,6 +179,7 @@ pub struct HistoryIndexingStages;
 impl<DB: Database> StageSet<DB> for HistoryIndexingStages {
     fn builder(self) -> StageSetBuilder<DB> {
         StageSetBuilder::default()
+            .add_stage(TransactionLookupStage::default())
             .add_stage(IndexStorageHistoryStage::default())
             .add_stage(IndexAccountHistoryStage::default())
     }

@@ -21,7 +21,7 @@ const SENDER_RECOVERY: StageId = StageId("SenderRecovery");
 /// The sender recovery stage iterates over existing transactions,
 /// recovers the transaction signer and stores them
 /// in [`TxSenders`][reth_db::tables::TxSenders] table.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SenderRecoveryStage {
     /// The size of the chunk for parallel sender recovery
     pub batch_size: usize,
@@ -32,7 +32,7 @@ pub struct SenderRecoveryStage {
 
 impl Default for SenderRecoveryStage {
     fn default() -> Self {
-        Self { batch_size: 1000, commit_threshold: 5000 }
+        Self { batch_size: 250000, commit_threshold: 10000 }
     }
 }
 
@@ -87,9 +87,7 @@ impl<DB: Database> Stage<DB> for SenderRecoveryStage {
         // Acquire the cursor over the transactions
         let mut tx_cursor = tx.cursor_read::<tables::Transactions>()?;
         // Walk the transactions from start to end index (inclusive)
-        let entries = tx_cursor
-            .walk(start_tx_index)?
-            .take_while(|res| res.as_ref().map(|(k, _)| *k <= end_tx_index).unwrap_or_default());
+        let entries = tx_cursor.walk_range(start_tx_index..end_tx_index + 1)?;
 
         // Iterate over transactions in chunks
         info!(target: "sync::stages::sender_recovery", start_tx_index, end_tx_index, "Recovering senders");

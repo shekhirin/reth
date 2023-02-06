@@ -172,12 +172,6 @@ pub enum Transaction {
     Eip1559(TxEip1559),
 }
 
-impl Default for Transaction {
-    fn default() -> Self {
-        Self::Legacy(TxLegacy::default())
-    }
-}
-
 impl Transaction {
     /// Heavy operation that return signature hash over rlp encoded transaction.
     /// It is only for signature signing or signer recovery.
@@ -428,24 +422,15 @@ impl Transaction {
     }
 }
 
+impl Default for Transaction {
+    fn default() -> Self {
+        Self::Legacy(TxLegacy::default())
+    }
+}
+
 /// This encodes the transaction _without_ the signature, and is only suitable for creating a hash
 /// intended for signing.
 impl Encodable for Transaction {
-    fn length(&self) -> usize {
-        match self {
-            Transaction::Legacy { .. } => {
-                let payload_length = self.fields_len() + self.eip155_fields_len();
-                // 'header length' + 'payload length'
-                length_of_length(payload_length) + payload_length
-            }
-            _ => {
-                let payload_length = self.fields_len();
-                // 'transaction type byte length' + 'header length' + 'payload length'
-                1 + length_of_length(payload_length) + payload_length
-            }
-        }
-    }
-
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         match self {
             Transaction::Legacy { .. } => {
@@ -458,6 +443,21 @@ impl Encodable for Transaction {
                 out.put_u8(self.tx_type() as u8);
                 Header { list: true, payload_length: self.fields_len() }.encode(out);
                 self.encode_fields(out);
+            }
+        }
+    }
+
+    fn length(&self) -> usize {
+        match self {
+            Transaction::Legacy { .. } => {
+                let payload_length = self.fields_len() + self.eip155_fields_len();
+                // 'header length' + 'payload length'
+                length_of_length(payload_length) + payload_length
+            }
+            _ => {
+                let payload_length = self.fields_len();
+                // 'transaction type byte length' + 'header length' + 'payload length'
+                1 + length_of_length(payload_length) + payload_length
             }
         }
     }
@@ -475,16 +475,16 @@ pub enum TransactionKind {
 }
 
 impl Encodable for TransactionKind {
-    fn length(&self) -> usize {
-        match self {
-            TransactionKind::Call(to) => to.length(),
-            TransactionKind::Create => 1, // EMPTY_STRING_CODE is a single byte
-        }
-    }
     fn encode(&self, out: &mut dyn reth_rlp::BufMut) {
         match self {
             TransactionKind::Call(to) => to.encode(out),
             TransactionKind::Create => out.put_u8(EMPTY_STRING_CODE),
+        }
+    }
+    fn length(&self) -> usize {
+        match self {
+            TransactionKind::Call(to) => to.length(),
+            TransactionKind::Create => 1, // EMPTY_STRING_CODE is a single byte
         }
     }
 }
@@ -520,50 +520,105 @@ pub struct TransactionSigned {
     pub transaction: Transaction,
 }
 
-#[cfg(any(test, feature = "arbitrary"))]
-use proptest::{
-    prelude::{any, Strategy},
-    strategy::BoxedStrategy,
-};
+// === impl TransactionSigned ===
 
-#[cfg(any(test, feature = "arbitrary"))]
-impl proptest::arbitrary::Arbitrary for TransactionSigned {
-    type Parameters = ();
-    type Strategy = BoxedStrategy<TransactionSigned>;
-
-    fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
-        any::<(Transaction, Signature)>()
-            .prop_map(move |(mut transaction, sig)| {
-                if let Some(chain_id) = transaction.chain_id().cloned() {
-                    // Otherwise we might overflow when calculating `v` on `recalculate_hash`
-                    transaction.set_chain_id(chain_id % (u64::MAX / 2 - 36));
-                }
-                let mut tx =
-                    TransactionSigned { hash: Default::default(), signature: sig, transaction };
-                tx.hash = tx.recalculate_hash();
-                tx
-            })
-            .boxed()
+impl TransactionSigned {
+    /// Transaction signature.
+    pub fn signature(&self) -> &Signature {
+        &self.signature
     }
-}
 
-#[cfg(any(test, feature = "arbitrary"))]
-impl<'a> arbitrary::Arbitrary<'a> for TransactionSigned {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let mut transaction = Transaction::arbitrary(u)?;
-        if let Some(chain_id) = transaction.chain_id().cloned() {
-            // Otherwise we might overflow when calculating `v` on `recalculate_hash`
-            transaction.set_chain_id(chain_id % (u64::MAX / 2 - 36));
+    /// Transaction hash. Used to identify transaction.
+    pub fn hash(&self) -> TxHash {
+        self.hash
+    }
+
+    /// Recover signer from signature and hash.
+    ///
+    /// Returns `None` if the transaction's signature is invalid.
+    pub fn recover_signer(&self) -> Option<Address> {
+        let signature_hash = self.signature_hash();
+        self.signature.recover_signer(signature_hash)
+    }
+
+    /// Devour Self, recover signer and return [`TransactionSignedEcRecovered`]
+    ///
+    /// Returns `None` if the transaction's signature is invalid.
+    pub fn into_ecrecovered(self) -> Option<TransactionSignedEcRecovered> {
+        let signer = self.recover_signer()?;
+        Some(TransactionSignedEcRecovered { signed_transaction: self, signer })
+    }
+
+    /// try to recover signer and return [`TransactionSignedEcRecovered`]
+    pub fn try_ecrecovered(&self) -> Option<TransactionSignedEcRecovered> {
+        let signer = self.recover_signer()?;
+        Some(TransactionSignedEcRecovered { signed_transaction: self.clone(), signer })
+    }
+
+    /// Inner encoding function that is used for both rlp [`Encodable`] trait and for calculating
+    /// hash that for eip2728 does not require rlp header
+    pub(crate) fn encode_inner(&self, out: &mut dyn bytes::BufMut, with_header: bool) {
+        match self.transaction {
+            Transaction::Legacy(TxLegacy { chain_id, .. }) => {
+                // do nothing w/ with_header
+                let payload_length = self.transaction.fields_len() +
+                    self.signature.payload_len_with_eip155_chain_id(chain_id);
+                let header = Header { list: true, payload_length };
+                header.encode(out);
+                self.transaction.encode_fields(out);
+                self.signature.encode_with_eip155_chain_id(out, chain_id);
+            }
+            _ => {
+                let payload_length = self.transaction.fields_len() + self.signature.payload_len();
+                if with_header {
+                    Header {
+                        list: false,
+                        payload_length: 1 + length_of_length(payload_length) + payload_length,
+                    }
+                    .encode(out);
+                }
+                out.put_u8(self.transaction.tx_type() as u8);
+                let header = Header { list: true, payload_length };
+                header.encode(out);
+                self.transaction.encode_fields(out);
+                self.signature.encode(out);
+            }
         }
+    }
 
-        let mut tx = TransactionSigned {
-            hash: Default::default(),
-            signature: Signature::arbitrary(u)?,
-            transaction,
-        };
-        tx.hash = tx.recalculate_hash();
+    /// Output the length of the encode_inner(out, true). Note to assume that `with_header` is only
+    /// `true`.
+    pub(crate) fn payload_len_inner(&self) -> usize {
+        match self.transaction {
+            Transaction::Legacy(TxLegacy { chain_id, .. }) => {
+                let payload_length = self.transaction.fields_len() +
+                    self.signature.payload_len_with_eip155_chain_id(chain_id);
+                // 'header length' + 'payload length'
+                length_of_length(payload_length) + payload_length
+            }
+            _ => {
+                let payload_length = self.transaction.fields_len() + self.signature.payload_len();
+                // 'transaction type byte length' + 'header length' + 'payload length'
+                let len = 1 + length_of_length(payload_length) + payload_length;
+                length_of_length(len) + len
+            }
+        }
+    }
 
-        Ok(tx)
+    /// Calculate transaction hash, eip2728 transaction does not contain rlp header and start with
+    /// tx type.
+    pub fn recalculate_hash(&self) -> H256 {
+        let mut buf = Vec::new();
+        self.encode_inner(&mut buf, false);
+        keccak256(&buf)
+    }
+
+    /// Create a new signed transaction from a transaction and its signature.
+    /// This will also calculate the transaction hash using its encoding.
+    pub fn from_transaction_and_signature(transaction: Transaction, signature: Signature) -> Self {
+        let mut initial_tx = Self { transaction, hash: Default::default(), signature };
+        initial_tx.hash = initial_tx.recalculate_hash();
+        initial_tx
     }
 }
 
@@ -658,101 +713,46 @@ impl Decodable for TransactionSigned {
     }
 }
 
-impl TransactionSigned {
-    /// Transaction signature.
-    pub fn signature(&self) -> &Signature {
-        &self.signature
-    }
+#[cfg(any(test, feature = "arbitrary"))]
+impl proptest::arbitrary::Arbitrary for TransactionSigned {
+    type Parameters = ();
+    type Strategy = proptest::strategy::BoxedStrategy<TransactionSigned>;
 
-    /// Transaction hash. Used to identify transaction.
-    pub fn hash(&self) -> TxHash {
-        self.hash
-    }
+    fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
+        use proptest::prelude::{any, Strategy};
 
-    /// Recover signer from signature and hash.
-    ///
-    /// Returns `None` if the transaction's signature is invalid.
-    pub fn recover_signer(&self) -> Option<Address> {
-        let signature_hash = self.signature_hash();
-        self.signature.recover_signer(signature_hash)
-    }
-
-    /// Devour Self, recover signer and return [`TransactionSignedEcRecovered`]
-    pub fn into_ecrecovered(self) -> Option<TransactionSignedEcRecovered> {
-        let signer = self.recover_signer()?;
-        Some(TransactionSignedEcRecovered { signed_transaction: self, signer })
-    }
-
-    /// try to recover signer and return [`TransactionSignedEcRecovered`]
-    pub fn try_ecrecovered(&self) -> Option<TransactionSignedEcRecovered> {
-        let signer = self.recover_signer()?;
-        Some(TransactionSignedEcRecovered { signed_transaction: self.clone(), signer })
-    }
-
-    /// Inner encoding function that is used for both rlp [`Encodable`] trait and for calculating
-    /// hash that for eip2728 does not require rlp header
-    pub(crate) fn encode_inner(&self, out: &mut dyn bytes::BufMut, with_header: bool) {
-        match self.transaction {
-            Transaction::Legacy(TxLegacy { chain_id, .. }) => {
-                // do nothing w/ with_header
-                let payload_length = self.transaction.fields_len() +
-                    self.signature.payload_len_with_eip155_chain_id(chain_id);
-                let header = Header { list: true, payload_length };
-                header.encode(out);
-                self.transaction.encode_fields(out);
-                self.signature.encode_with_eip155_chain_id(out, chain_id);
-            }
-            _ => {
-                let payload_length = self.transaction.fields_len() + self.signature.payload_len();
-                if with_header {
-                    Header {
-                        list: false,
-                        payload_length: 1 + length_of_length(payload_length) + payload_length,
-                    }
-                    .encode(out);
+        any::<(Transaction, Signature)>()
+            .prop_map(move |(mut transaction, sig)| {
+                if let Some(chain_id) = transaction.chain_id().cloned() {
+                    // Otherwise we might overflow when calculating `v` on `recalculate_hash`
+                    transaction.set_chain_id(chain_id % (u64::MAX / 2 - 36));
                 }
-                out.put_u8(self.transaction.tx_type() as u8);
-                let header = Header { list: true, payload_length };
-                header.encode(out);
-                self.transaction.encode_fields(out);
-                self.signature.encode(out);
-            }
+                let mut tx =
+                    TransactionSigned { hash: Default::default(), signature: sig, transaction };
+                tx.hash = tx.recalculate_hash();
+                tx
+            })
+            .boxed()
+    }
+}
+
+#[cfg(any(test, feature = "arbitrary"))]
+impl<'a> arbitrary::Arbitrary<'a> for TransactionSigned {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let mut transaction = Transaction::arbitrary(u)?;
+        if let Some(chain_id) = transaction.chain_id().cloned() {
+            // Otherwise we might overflow when calculating `v` on `recalculate_hash`
+            transaction.set_chain_id(chain_id % (u64::MAX / 2 - 36));
         }
-    }
 
-    /// Output the length of the encode_inner(out, true). Note to assume that `with_header` is only
-    /// `true`.
-    pub(crate) fn payload_len_inner(&self) -> usize {
-        match self.transaction {
-            Transaction::Legacy(TxLegacy { chain_id, .. }) => {
-                let payload_length = self.transaction.fields_len() +
-                    self.signature.payload_len_with_eip155_chain_id(chain_id);
-                // 'header length' + 'payload length'
-                length_of_length(payload_length) + payload_length
-            }
-            _ => {
-                let payload_length = self.transaction.fields_len() + self.signature.payload_len();
-                // 'transaction type byte length' + 'header length' + 'payload length'
-                let len = 1 + length_of_length(payload_length) + payload_length;
-                length_of_length(len) + len
-            }
-        }
-    }
+        let mut tx = TransactionSigned {
+            hash: Default::default(),
+            signature: Signature::arbitrary(u)?,
+            transaction,
+        };
+        tx.hash = tx.recalculate_hash();
 
-    /// Calculate transaction hash, eip2728 transaction does not contain rlp header and start with
-    /// tx type.
-    pub fn recalculate_hash(&self) -> H256 {
-        let mut buf = Vec::new();
-        self.encode_inner(&mut buf, false);
-        keccak256(&buf)
-    }
-
-    /// Create a new signed transaction from a transaction and its signature.
-    /// This will also calculate the transaction hash using its encoding.
-    pub fn from_transaction_and_signature(transaction: Transaction, signature: Signature) -> Self {
-        let mut initial_tx = Self { transaction, hash: Default::default(), signature };
-        initial_tx.hash = initial_tx.recalculate_hash();
-        initial_tx
+        Ok(tx)
     }
 }
 
@@ -766,16 +766,6 @@ pub struct TransactionSignedEcRecovered {
     #[deref]
     #[as_ref]
     signed_transaction: TransactionSigned,
-}
-
-impl Encodable for TransactionSignedEcRecovered {
-    fn length(&self) -> usize {
-        self.signed_transaction.length()
-    }
-
-    fn encode(&self, out: &mut dyn bytes::BufMut) {
-        self.signed_transaction.encode(out)
-    }
 }
 
 impl TransactionSignedEcRecovered {
@@ -810,6 +800,16 @@ impl FromRecoveredTransaction for TransactionSignedEcRecovered {
     #[inline]
     fn from_recovered_transaction(tx: TransactionSignedEcRecovered) -> Self {
         tx
+    }
+}
+
+impl Encodable for TransactionSignedEcRecovered {
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        self.signed_transaction.encode(out)
+    }
+
+    fn length(&self) -> usize {
+        self.signed_transaction.length()
     }
 }
 

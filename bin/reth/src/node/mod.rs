@@ -11,7 +11,7 @@ use clap::{crate_version, Parser};
 use eyre::Context;
 use fdlimit::raise_fd_limit;
 use futures::{stream::select as stream_select, Stream, StreamExt};
-use reth_consensus::BeaconConsensus;
+use reth_consensus::beacon::BeaconConsensus;
 use reth_db::mdbx::{Env, WriteMap};
 use reth_downloaders::{bodies, headers};
 use reth_interfaces::consensus::{Consensus, ForkchoiceState};
@@ -80,6 +80,10 @@ pub struct Command {
 
     #[arg(long, default_value = "any")]
     nat: NatResolver,
+
+    /// Runs the sync only up to the specified block
+    #[arg(long = "debug.max-block", help_heading = "Debug")]
+    max_block: Option<u64>,
 }
 
 impl Command {
@@ -153,26 +157,21 @@ impl Command {
     }
 
     fn init_consensus(&self) -> eyre::Result<Arc<dyn Consensus>> {
-        // TODO: This should be in a builder/factory in the consensus crate
-        let consensus: Arc<dyn Consensus> = {
-            let beacon_consensus = BeaconConsensus::new(self.chain.clone());
+        let (consensus, notifier) = BeaconConsensus::builder().build(self.chain.clone());
 
-            if let Some(tip) = self.tip {
-                debug!(target: "reth::cli", %tip, "Tip manually set");
-                beacon_consensus.notify_fork_choice_state(ForkchoiceState {
-                    head_block_hash: tip,
-                    safe_block_hash: tip,
-                    finalized_block_hash: tip,
-                })?;
-            } else {
-                let warn_msg = "No tip specified. \
-                reth cannot communicate with consensus clients, \
-                so a tip must manually be provided for the online stages with --debug.tip <HASH>.";
-                warn!(target: "reth::cli", warn_msg);
-            }
-
-            Arc::new(beacon_consensus)
-        };
+        if let Some(tip) = self.tip {
+            debug!(target: "reth::cli", %tip, "Tip manually set");
+            notifier.send(ForkchoiceState {
+                head_block_hash: tip,
+                safe_block_hash: tip,
+                finalized_block_hash: tip,
+            })?;
+        } else {
+            let warn_msg = "No tip specified. \
+            reth cannot communicate with consensus clients, \
+            so a tip must manually be provided for the online stages with --debug.tip <HASH>.";
+            warn!(target: "reth::cli", warn_msg);
+        }
 
         Ok(consensus)
     }
@@ -204,7 +203,13 @@ impl Command {
         let body_downloader = self.spawn_bodies_downloader(config, consensus, &fetch_client, db);
         let stage_conf = &config.stages;
 
-        let pipeline = Pipeline::builder()
+        let mut builder = Pipeline::builder();
+
+        if let Some(max_block) = self.max_block {
+            builder = builder.with_max_block(max_block)
+        }
+
+        let pipeline = builder
             .with_sync_state_updater(network.clone())
             .add_stages(
                 OnlineStages::new(consensus.clone(), header_downloader, body_downloader).set(
@@ -217,7 +222,7 @@ impl Command {
                 OfflineStages::default()
                     .set(SenderRecoveryStage {
                         batch_size: stage_conf.sender_recovery.batch_size,
-                        commit_threshold: stage_conf.execution.commit_threshold,
+                        commit_threshold: stage_conf.sender_recovery.commit_threshold,
                     })
                     .set(ExecutionStage {
                         chain_spec: self.chain.clone(),
@@ -237,7 +242,7 @@ impl Command {
     ) -> reth_downloaders::headers::task::TaskDownloader {
         let headers_conf = &config.stages.headers;
         headers::task::TaskDownloader::spawn(
-            headers::linear::LinearDownloadBuilder::default()
+            headers::reverse_headers::ReverseHeadersDownloaderBuilder::default()
                 .request_limit(headers_conf.downloader_batch_size)
                 .stream_batch_size(headers_conf.commit_threshold as usize)
                 .build(consensus.clone(), fetch_client.clone()),
@@ -253,7 +258,7 @@ impl Command {
     ) -> reth_downloaders::bodies::task::TaskDownloader {
         let bodies_conf = &config.stages.bodies;
         bodies::task::TaskDownloader::spawn(
-            bodies::concurrent::ConcurrentDownloaderBuilder::default()
+            bodies::bodies::BodiesDownloaderBuilder::default()
                 .with_stream_batch_size(bodies_conf.downloader_stream_batch_size)
                 .with_request_limit(bodies_conf.downloader_request_limit)
                 .with_max_buffered_responses(bodies_conf.downloader_max_buffered_responses)
