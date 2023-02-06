@@ -17,7 +17,7 @@ use crate::{
     },
 };
 use reth_primitives::{
-    Account, Address, BlockHash, BlockNumber, Header, IntegerList, Receipt, StorageEntry,
+    Account, Address, Block, BlockHash, BlockNumber, Header, IntegerList, Receipt, StorageEntry,
     StorageTrieEntry, TransactionSigned, TransitionId, TxHash, TxNumber, H256,
 };
 
@@ -40,7 +40,7 @@ pub const TABLES: [(TableType, &str); 27] = [
     (TableType::Table, Headers::const_name()),
     (TableType::Table, BlockBodies::const_name()),
     (TableType::Table, BlockOmmers::const_name()),
-    (TableType::Table, NonCanonicalTransactions::const_name()),
+    (TableType::Table, PendingBlocks::const_name()),
     (TableType::Table, Transactions::const_name()),
     (TableType::Table, TxHashNumber::const_name()),
     (TableType::Table, Receipts::const_name()),
@@ -143,8 +143,8 @@ table!(
 );
 
 table!(
-    /// Stores the transaction body from non canonical transactions.
-    ( NonCanonicalTransactions ) BlockNumHashTxNumber | TransactionSigned
+    /// Stores full block that can be potentially included to canonical chain.
+    ( PendingBlocks ) BlockHash | Block
 );
 
 table!(

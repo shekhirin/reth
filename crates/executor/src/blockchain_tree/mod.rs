@@ -1,11 +1,11 @@
-//!
+//! Implementation of [`BlockchainTree`]
 pub mod chain;
 
 pub use chain::{BlockJoint, Chain, ChainId};
 
-use reth_db::database::Database;
-use reth_interfaces::consensus::Consensus;
-use reth_primitives::{BlockHash, BlockNumber, SealedBlock, H256};
+use reth_db::{database::Database, tables, transaction::DbTxMut};
+use reth_interfaces::{consensus::Consensus, executor::Error as ExecError, Error};
+use reth_primitives::{BlockHash, BlockNumber, SealedBlock};
 use reth_provider::{HeaderProvider, ShareableDatabase};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -39,41 +39,93 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// classDef pending fill:#FFCA3A
 /// classDef sidechain fill:#FF595E
 /// ```
+///
+///
+/// main functions:
+/// * insert_block: insert block inside tree. Execute it and save it to database.
+/// * finalize_block: Flush chain that join to finalized block.
+/// * make_canonical: Check if we have the hash of block that we want to finalize. Do reorg if
+///   needed
 pub struct BlockchainTree<DB, CONSENSUS> {
     /// chains and present data
     pub chains: HashMap<ChainId, Chain>,
-
     /// Static chain id generator
     pub chain_id_generator: u64,
-    /// Block hashes and side chain they belong
-    pub blocks: HashMap<H256, ChainId>,
-    /// Index needed when discarding the chain, so we can remove connected chains from tree.
-    pub block_child: HashMap<H256, HashSet<H256>>,
-    /// Canonical chain. Contains N number (depends on `finalization_depth`) of blocks  
-    pub canonical_chain: BTreeMap<BlockNumber, BlockHash>,
-    /// Depth after we can prune blocks from chains and be sure that there will not be pending blocks.
+    /// Indices to block and their connection.
+    pub block_indices: BlockIndices,
+    /// Depth after we can prune blocks from chains and be sure that there will not be pending
+    /// blocks.
     pub finalization_block: BlockNumber,
     /// Max chain height. Number of blocks that side chain can have.
     pub max_chain_length: u64,
-    /// Needs db to save sidechain, do reorgs and push new block to canonical chain that is inside db.
+    /// Needs db to save sidechain, do reorgs and push new block to canonical chain that is inside
+    /// db.
     pub db: DB,
     /// Consensus
     pub consensus: CONSENSUS,
+}
+
+/// Internal indices of the block.
+#[derive(Default)]
+pub struct BlockIndices {
+    /// Index needed when discarding the chain, so we can remove connected chains from tree.
+    /// NOTE: It contains just a blocks that are forks as a key and not all blocks.
+    pub fork_to_child: HashMap<BlockHash, HashSet<BlockHash>>,
+    /// Block number to block hash, used to flush block.
+    pub number_to_block: HashMap<BlockNumber, BlockHash>,
+    /// Canonical chain. Contains N number (depends on `finalization_depth`) of blocks  
+    pub canonical_chain: BTreeMap<BlockNumber, BlockHash>,
+    /// Block hashes and side chain they belong
+    pub blocks_to_chain: HashMap<BlockHash, ChainId>,
     /* Add additional indices if needed as in tx hash index to block */
 }
 
-///
-/// main functions
-/// insert_block
-/// finalize_blook
-/// make_canonical
-/// 
+impl BlockIndices {
+    /// Insert block to chain and fork child indices of the new chail
+    pub fn insert_chain(&mut self, chain_id: ChainId, chain: &Chain) {
+        // add block -> chain_id index
+        self.blocks_to_chain.extend(chain.blocks.iter().map(|h| (h.hash(), chain_id)));
+        let first = chain.first();
+        // add parent block -> block index
+        self.fork_to_child.entry(first.parent_hash).or_default().insert(first.hash());
+    }
+
+    /// get block chain id
+    pub fn get_block_chain_id(&self, block: &BlockHash) -> Option<ChainId> {
+        self.blocks_to_chain.get(block).cloned()
+    }
+
+    /// Used for finalization of
+    pub fn finalize_canonical_blocks(&mut self, block_number: &BlockNumber) -> Vec<ChainId> {
+        let mut finalized_blocks = self.canonical_chain.split_off(&(block_number + 1));
+
+        core::mem::swap(&mut finalized_blocks, &mut self.canonical_chain);
+        //finalized_blocks.into_iter().map(|(number,hash)|
+        // self.fork_to_child.remove(hash)).filter()
+
+        Vec::new()
+    }
+
+    /// get canonical hash
+    pub fn canonical_hash(&self, block_number: &BlockNumber) -> Option<BlockHash> {
+        self.canonical_chain.get(block_number).cloned()
+    }
+
+    /// get canonical tip
+    pub fn canonical_tip(&self) -> BlockJoint {
+        let (&number, &hash) =
+            self.canonical_chain.last_key_value().expect("There is always the canonical chain");
+        BlockJoint { number, hash }
+    }
+}
 
 impl<DB: Database, CONSENSUS: Consensus> BlockchainTree<DB, CONSENSUS> {
+    /// DONE
     /// Append block at the end of the chain or create new chain with this block.
-    fn insert_block_in_chain(&mut self, block: SealedBlock, chain_id: ChainId) -> Result<(), ()> {
+    fn join_block_to_chain(&mut self, block: SealedBlock, chain_id: ChainId) -> Result<(), Error> {
         // or return error as insertng is not possible
-        let parent_chain = self.chains.get_mut(&chain_id).ok_or(())?;
+        let parent_chain =
+            self.chains.get_mut(&chain_id).ok_or(ExecError::ChainIdConsistency { chain_id })?;
         let last_block_hash = parent_chain.tip().hash();
 
         if last_block_hash == block.parent_hash {
@@ -86,43 +138,46 @@ impl<DB: Database, CONSENSUS: Consensus> BlockchainTree<DB, CONSENSUS> {
         Ok(())
     }
 
+    /// DONE
     /// Insert chain to tree and ties the blocks to it.
+    /// Helper function that handles indexing and inserting.
     fn insert_chain(&mut self, chain: Chain) -> ChainId {
         let chain_id = self.chain_id_generator;
-        // add block -> chain_id index
-        self.blocks.extend(chain.blocks.iter().map(|h| (h.hash(), chain_id)));
-        // add chain_id -> chain
-        self.chains.insert(chain_id, chain);
         self.chain_id_generator += 1;
+        self.block_indices.insert_chain(chain_id, &chain);
+        // add chain_id -> chain index
+        self.chains.insert(chain_id, chain);
         chain_id
     }
 
+    /// DONE
     /// Insert block inside tree
-    // Done
-    pub fn insert_block(&mut self, block: SealedBlock) -> Result<(), ()> {
+    pub fn insert_block(&mut self, block: SealedBlock) -> Result<(), Error> {
         // check if block parent can be found in Tree
-        if let Some(parent_chain) = self.blocks.get(&block.parent_hash) {
-            self.insert_block_in_chain(block, *parent_chain)
+        if let Some(parent_chain) = self.block_indices.get_block_chain_id(&block.parent_hash) {
+            self.join_block_to_chain(block.clone(), parent_chain)?;
         // if not found, check if it can be found inside canonical chain aka db.
         } else if let Some(parent) =
             ShareableDatabase::new(&self.db).header(&block.parent_hash).ok().flatten()
         {
             // create new chain that points to that block
-            let chain = Chain::new_canonical_joint(block, &parent, &self.db, &self.consensus)?;
+            let chain =
+                Chain::new_canonical_joint(block.clone(), &parent, &self.db, &self.consensus)?;
             self.insert_chain(chain);
-            Ok(())
         } else {
-            // TODO: fetch from p2p or discard if no parent is present.
-            // see how to handle recovery after this as can could receive this block
-            // in `make_canonical` function
-            return Ok(());
+            // NOTE: fetch parent from p2p or discard if no parent is present.
+            // see how to handle recovery after this as we could receive this block
+            // in `make_canonical` function, this could be a trigger to initiate syncing.
+            return Ok(())
         }
-        // TODO insert block to DB
+        let block_hash = block.hash();
+        let unsealed_block = block.unseal();
+        self.db.tx_mut()?.put::<tables::PendingBlocks>(block_hash, unsealed_block)?;
+        Ok(())
     }
 
+    /// TODO
     pub fn finalize_block(&mut self, finalized_block_num: BlockNumber) -> Result<(), ()> {
-        //let blocks_removed = HashMap::new();
-
         // iter
 
         //let filtered_chains = self.chains.
@@ -131,9 +186,10 @@ impl<DB: Database, CONSENSUS: Consensus> BlockchainTree<DB, CONSENSUS> {
         Ok(())
     }
 
+    /// DONE
     /// Make block and its parent canonical. Unwind chains to database if necessary.
     pub fn make_canonical(&mut self, block_hash: &BlockHash) -> Result<(), ()> {
-        let chain_id = *self.blocks.get(block_hash).ok_or(())?;
+        let chain_id = self.block_indices.get_block_chain_id(block_hash).ok_or(())?;
         let chain = self.chains.remove(&chain_id).expect("To be present");
         // we are spliting chain as there is possibility that only part of chain get canonical.
         let (canonical, pending) = chain.split_at_block_hash(block_hash);
@@ -144,13 +200,13 @@ impl<DB: Database, CONSENSUS: Consensus> BlockchainTree<DB, CONSENSUS> {
             self.chains.insert(chain_id, pending);
         }
 
-        let mut block_joint = canonical.block_joint;
+        let mut block_joint = canonical.joint_block();
         let mut block_joint_number = canonical.joint_block_number();
-        let mut chains_to_promote = vec![(chain_id, canonical)];
+        let mut chains_to_promote = vec![canonical];
         // loop while joint blocks are found in Tree.
-        while let Some(chain_id) = self.blocks.get(&block_joint.hash).cloned() {
+        while let Some(chain_id) = self.block_indices.get_block_chain_id(&block_joint.hash) {
             let chain = self.chains.remove(&chain_id).expect("To joint to be present");
-            block_joint = chain.block_joint;
+            block_joint = chain.joint_block();
             let (canonical, rest) = chain.split_at_number(block_joint_number);
             let canonical = canonical.expect("Chain is present");
             // reinsert back the chunk of sidechain that didn't get reorged.
@@ -158,61 +214,64 @@ impl<DB: Database, CONSENSUS: Consensus> BlockchainTree<DB, CONSENSUS> {
                 self.chains.insert(chain_id, rest_of_sidechain);
             }
             block_joint_number = canonical.joint_block_number();
-            chains_to_promote.push((chain_id, canonical));
+            chains_to_promote.push(canonical);
         }
 
-        let (_, &the_tip) =
-            self.canonical_chain.last_key_value().expect("There is always the canonical chain");
-        let block = self.canonical_chain.get(&block_joint.number).cloned();
+        let old_tip = self.block_indices.canonical_tip();
+        // Merge all chain into one chain.
+        let mut new_canon_chain = chains_to_promote.pop().expect("There is at least one block");
+        for chain in chains_to_promote.into_iter().rev() {
+            new_canon_chain.append_chain(chain, &self.db, &self.consensus)?
+        }
 
-        // if joins to the tip
-        if block_joint.hash == the_tip {
+        // if joins to the tipx
+        if new_canon_chain.joint_block_hash() == old_tip.hash {
             // append to database
-        } else if block == Some(block_joint.hash) {
-            // it joints to canonical but not tip
-
-            // last chain is first that needs to be flushed
-            let revert_until = chains_to_promote
-                .last()
-                .expect("there is at least one block")
-                .1
-                .joint_block_number();
-
-            // revert `N` blocks from canonical chain and put them inside BlockchanTree
-            self.revert_canonical(revert_until)?;
-
-            for (chain_id, new_canonical_chain) in chains_to_promote.into_iter().rev() {
-                // iterate over all chains that has canonical joints and point them to this chain.
-                self.commit_canonical(new_canonical_chain)?;
-
-                // When flushing out all blocks, removed them from BlockchanTree.
-            }
+            self.commit_canonical(new_canon_chain)?;
         } else {
-            unreachable!("As while loop flushed all chains blocks")
-        }
+            // it joints to canonical block that is not the tip.
 
-        // If canonical joint points to parent block that is not tip
-        // Unwind block to that parent and add that `Chain` to BlockchainTree
-        // flush new canonical to database and remove its `Chain` from `BlockchainTree`.
+            let canon_joint = new_canon_chain.joint_block();
+            // sanity check
+            if self.block_indices.canonical_hash(&canon_joint.number) != Some(canon_joint.hash) {
+                unreachable!("All chains should point to canonical chain.");
+            }
+
+            // revert `N` blocks from current canonical chain and put them inside BlockchanTree
+            // This is main reorgs on tables.
+            let old_canon_chain = self.revert_canonical(canon_joint.number)?;
+            self.commit_canonical(new_canon_chain)?;
+
+            // insert old canonical chain to BlockchainTree.
+            self.insert_chain(old_canon_chain);
+        }
 
         Ok(())
     }
 
     /// Commit chain for it to become canonical. Assume we are doing pending operation to db.
-    fn commit_canonical(&mut self, chain: Chain) -> Result<(), ()> {
+    fn commit_canonical(&mut self, _chain: Chain) -> Result<(), ()> {
+        // update self.block_indices
+
+        // remove all committed blocks from Tree.
         Ok(())
     }
 
     /// Revert canonical blocks from database and insert them to pending table
-    fn revert_canonical(&mut self, revert_until: BlockNumber) -> Result<(), ()> {
+    /// Revert should be non inclusive, and revert_until should stay in db.
+    /// Return the chain that represent reverted canonical blocks.
+    fn revert_canonical(&mut self, _revert_until: BlockNumber) -> Result<Chain, ()> {
         // read data that is needed for new sidechain
 
         // Use pipeline (or part of it) to unwind canonical chain from database.
 
-        // think about atomicity of operations. if we put canonical chain inside tree, what could happen?
+        // think about atomicity of operations. if we put canonical chain inside tree, what could
+        // happen?
 
         // commit old canonical to pending table.
 
-        Ok(())
+        // update self.block_indices
+
+        Ok(Chain::default())
     }
 }

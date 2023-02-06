@@ -1,18 +1,19 @@
 use crate::{Header, SealedHeader, TransactionSigned, H256};
-use reth_codecs::derive_arbitrary;
+use reth_codecs::{derive_arbitrary, main_codec, Compact};
 use reth_rlp::{Decodable, DecodeError, Encodable, RlpDecodable, RlpEncodable};
 use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 
 /// Ethereum full block.
+#[main_codec]
 #[derive(Debug, Clone, PartialEq, Eq, Default, RlpEncodable, RlpDecodable)]
 pub struct Block {
-    /// Block header.
-    pub header: Header,
     /// Transactions in this block.
     pub body: Vec<TransactionSigned>,
     /// Ommers/uncles header
     pub ommers: Vec<Header>,
+    /// Block header.
+    pub header: Header,
 }
 
 impl Deref for Block {

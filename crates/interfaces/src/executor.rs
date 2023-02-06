@@ -49,4 +49,6 @@ pub enum Error {
     EVMError { error_code: u32 },
     #[error("Provider error")]
     ProviderError,
+    #[error("Chain can't be found with internal index {chain_id}")]
+    ChainIdConsistency { chain_id: u64 },
 }
