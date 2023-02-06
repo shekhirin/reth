@@ -125,10 +125,6 @@ impl<'a, Tx: DbTx<'a>> SealedBlockProvider for Tx {
 
         // // Fetch transactions, execute them and generate results
         for (header, body, ommers) in block_batch.into_iter() {
-            let mut block = SealedBlock::default();
-            block.header = header.clone().seal();
-            block.ommers = ommers.iter().cloned().map(|x| x.seal()).collect();
-
             let block_number = header.number;
             tracing::trace!(?block_number, "getting transactions and senders");
             // iterate over all transactions
@@ -170,7 +166,11 @@ impl<'a, Tx: DbTx<'a>> SealedBlockProvider for Tx {
                 signers.push(tx);
             }
 
-            block.body = transactions;
+            let block = SealedBlock {
+                header: header.clone().seal(),
+                ommers: ommers.iter().cloned().map(|x| x.seal()).collect(),
+                body: transactions,
+            };
             blocks.push((block, signers));
         }
 

@@ -71,6 +71,8 @@ impl ExecutionStage {
     }
 }
 
+use reth_provider::SealedBlockProvider;
+
 #[async_trait::async_trait]
 impl<DB: Database> Stage<DB> for ExecutionStage {
     /// Return the id of the stage
@@ -88,84 +90,18 @@ impl<DB: Database> Stage<DB> for ExecutionStage {
             exec_or_return!(input, self.commit_threshold, "sync::stages::execution");
         let last_block = input.stage_progress.unwrap_or_default();
 
-        // Get next canonical block hashes to execute.
-        let mut canonicals = tx.cursor_read::<tables::CanonicalHeaders>()?;
-        // Get header with canonical hashes.
-        let mut headers = tx.cursor_read::<tables::Headers>()?;
-        // Get bodies with canonical hashes.
-        let mut bodies_cursor = tx.cursor_read::<tables::BlockBodies>()?;
-        // Get ommers with canonical hashes.
-        let mut ommers_cursor = tx.cursor_read::<tables::BlockOmmers>()?;
-        // Get transaction of the block that we are executing.
-        let mut tx_cursor = tx.cursor_read::<tables::Transactions>()?;
-        // Skip sender recovery and load signer from database.
-        let mut tx_sender = tx.cursor_read::<tables::TxSenders>()?;
-
-        // get canonical blocks (num,hash)
-        let canonical_batch = canonicals
-            .walk_range(start_block..end_block + 1)?
-            .map(|i| i.map(BlockNumHash))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Get block headers and bodies from canonical hashes
-        let block_batch = canonical_batch
-            .iter()
-            .map(|key| -> Result<(Header, StoredBlockBody, Vec<Header>), StageError> {
-                // NOTE: It probably will be faster to fetch all items from one table with cursor,
-                // but to reduce complexity we are using `seek_exact` to skip some
-                // edge cases that can happen.
-                let (_, header) =
-                    headers.seek_exact(*key)?.ok_or(DatabaseIntegrityError::Header {
-                        number: key.number(),
-                        hash: key.hash(),
-                    })?;
-                let (_, body) = bodies_cursor
-                    .seek_exact(*key)?
-                    .ok_or(DatabaseIntegrityError::BlockBody { number: key.number() })?;
-                let (_, stored_ommers) = ommers_cursor.seek_exact(*key)?.unwrap_or_default();
-
-                Ok((header, body, stored_ommers.ommers))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let blocks = tx.sealed_block_range(start_block as usize..end_block as usize)?;
 
         // Create state provider with cached state
         let mut state_provider = SubState::new(State::new(LatestStateProviderRef::new(&**tx)));
 
-        // Fetch transactions, execute them and generate results
-        let mut block_change_patches = Vec::with_capacity(canonical_batch.len());
-        for (header, body, ommers) in block_batch.into_iter() {
+        let mut block_change_patches =
+            Vec::with_capacity(end_block as usize - start_block as usize);
+        for (block, signers) in blocks {
+            let (header, transactions, ommers) = block.split();
+            let header = header.unseal();
+            let ommers = ommers.into_iter().map(|x| x.unseal()).collect();
             let block_number = header.number;
-            tracing::trace!(target: "sync::stages::execution", ?block_number, "Execute block.");
-            // iterate over all transactions
-            let mut tx_walker = tx_cursor.walk(body.start_tx_id)?;
-            let mut transactions = Vec::with_capacity(body.tx_count as usize);
-            // get next N transactions.
-            for index in body.tx_id_range() {
-                let (tx_index, tx) =
-                    tx_walker.next().ok_or(DatabaseIntegrityError::EndOfTransactionTable)??;
-                if tx_index != index {
-                    error!(target: "sync::stages::execution", block = block_number, expected = index, found = tx_index, ?body, "Transaction gap");
-                    return Err(DatabaseIntegrityError::TransactionsGap { missing: tx_index }.into())
-                }
-                transactions.push(tx);
-            }
-
-            // take signers
-            let mut tx_sender_walker = tx_sender.walk(body.start_tx_id)?;
-            let mut signers = Vec::with_capacity(body.tx_count as usize);
-            for index in body.tx_id_range() {
-                let (tx_index, tx) = tx_sender_walker
-                    .next()
-                    .ok_or(DatabaseIntegrityError::EndOfTransactionSenderTable)??;
-                if tx_index != index {
-                    error!(target: "sync::stages::execution", block = block_number, expected = index, found = tx_index, ?body, "Signer gap");
-                    return Err(
-                        DatabaseIntegrityError::TransactionsSignerGap { missing: tx_index }.into()
-                    )
-                }
-                signers.push(tx);
-            }
-
             trace!(target: "sync::stages::execution", number = block_number, txs = transactions.len(), "Executing block");
 
             // For ethereum tests that has MAX gas that calls contract until max depth (1024 calls)

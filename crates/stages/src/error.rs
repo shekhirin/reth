@@ -50,6 +50,9 @@ pub enum StageError {
     /// These types of errors stop the pipeline.
     #[error(transparent)]
     Fatal(Box<dyn std::error::Error + Send + Sync>),
+
+    #[error(transparent)]
+    Other(#[from] reth_interfaces::Error),
 }
 
 impl StageError {
