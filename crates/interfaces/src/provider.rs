@@ -1,4 +1,4 @@
-use reth_primitives::{Address, BlockHash, BlockNumber, TransitionId, H256};
+use reth_primitives::{Address, BlockHash, BlockNumber, TransitionId, TxNumber, H256};
 
 /// KV error type. They are using u32 to represent error code.
 #[allow(missing_docs)]
@@ -24,4 +24,22 @@ pub enum Error {
     StorageChangeset { transition_id: TransitionId, address: Address, storage_key: H256 },
     #[error("Account {address:?} ChangeSet for transition #{transition_id} does not exist")]
     AccountChangeset { transition_id: TransitionId, address: Address },
+
+    /// A header is missing from the database.
+    #[error("No header for block #{number} ({hash:?})")]
+    Header {
+        /// The block number key
+        number: BlockNumber,
+        /// The block hash key
+        hash: H256,
+    },
+
+    #[error("Gap in transaction table. Missing tx number #{missing}.")]
+    TransactionsGap { missing: TxNumber },
+    #[error("Gap in transaction signer table. Missing tx number #{missing}.")]
+    TransactionsSignerGap { missing: TxNumber },
+    #[error("Got to the end of transaction table")]
+    EndOfTransactionTable,
+    #[error("Got to the end of the transaction sender table")]
+    EndOfTransactionSenderTable,
 }

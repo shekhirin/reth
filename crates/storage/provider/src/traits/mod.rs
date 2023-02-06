@@ -4,7 +4,7 @@ mod account;
 pub use account::AccountProvider;
 
 mod block;
-pub use block::BlockProvider;
+pub use block::*;
 
 mod block_hash;
 pub use block_hash::BlockHashProvider;

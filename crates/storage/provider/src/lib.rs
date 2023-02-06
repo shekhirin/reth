@@ -12,7 +12,7 @@
 mod traits;
 pub use traits::{
     AccountProvider, BlockHashProvider, BlockProvider, HeaderProvider, StateProvider,
-    StateProviderFactory,
+    StateProviderFactory, *,
 };
 
 /// Provider trait implementations.
