@@ -1,6 +1,7 @@
 //! Error variants for the `eth_` namespace.
 
 use crate::{impl_to_rpc_result, result::ToRpcResult};
+use reth_interfaces::Error as ProviderError;
 use reth_transaction_pool::error::PoolError;
 
 /// Result alias
@@ -19,6 +20,8 @@ pub(crate) enum EthApiError {
     InvalidTransactionSignature,
     #[error(transparent)]
     PoolError(GethTxPoolError),
+    #[error(transparent)]
+    ProviderError(#[from] ProviderError),
 }
 
 impl_to_rpc_result!(EthApiError);
