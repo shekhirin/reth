@@ -2,7 +2,7 @@ use crate::{BlockHashProvider, BlockProvider, Error, HeaderProvider, StateProvid
 use reth_db::{
     database::{Database, DatabaseGAT},
     tables,
-    transaction::DbTx,
+    transaction::DbTx, cursor::DbCursorRO,
 };
 use reth_interfaces::Result;
 use reth_primitives::{rpc::BlockId, Block, BlockHash, BlockNumber, ChainInfo, Header, H256, U256};
@@ -71,9 +71,26 @@ impl<DB: Database> BlockProvider for ShareableDatabase<DB> {
         })
     }
 
-    fn block(&self, _id: BlockId) -> Result<Option<Block>> {
-        // TODO
-        Ok(None)
+    fn block(&self, id: BlockId) -> Result<Option<Block>> {
+        match id {
+            BlockId::Hash(hash) => {
+                todo!()
+            },
+            BlockId::Number(num) => {
+                // triple question mark for result?, result?, return option if None
+                let block_body = self.db.view(|tx| tx.get_block_body_by_num(num))??.ok_or(Ok(None))?;
+                // quesion: how do we know if the block body points to transactions that are canonical vs
+                // not?
+                let txs = self.db.view(|tx| {
+                    let cursor = tx.cursor_read::<tables::Transactions>()?;
+
+                    let end = block_body.start_tx_id + block_body.num_txs;
+                    let txs = cursor.walk_range(block_body.start_tx_id..end)?.collect();
+                    txs
+                    // tx.get::<tables::Transactions>(block_body.start_tx_id)
+                })??;
+            }
+        }
     }
 
     fn block_number(&self, hash: H256) -> Result<Option<BlockNumber>> {
