@@ -1,4 +1,5 @@
 //! Implementation of [`BlockchainTree`]
+pub mod block_indices;
 pub mod chain;
 
 pub use chain::{BlockJoint, Chain, ChainId};
@@ -6,8 +7,9 @@ pub use chain::{BlockJoint, Chain, ChainId};
 use reth_db::{database::Database, tables, transaction::DbTxMut};
 use reth_interfaces::{consensus::Consensus, executor::Error as ExecError, Error};
 use reth_primitives::{BlockHash, BlockNumber, SealedBlock};
-use reth_provider::{HeaderProvider, ShareableDatabase};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use self::block_indices::BlockIndices;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// Tree of chains and it identifications.
@@ -43,9 +45,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 ///
 /// main functions:
 /// * insert_block: insert block inside tree. Execute it and save it to database.
-/// * finalize_block: Flush chain that join to finalized block.
-/// * make_canonical: Check if we have the hash of block that we want to finalize. Do reorg if
-///   needed
+/// * finalize_block: Flush chain that joins to finalized block.
+/// * make_canonical: Check if we have the hash of block that we want to finalize and commit it to db.
+/// Do reorg if needed
 pub struct BlockchainTree<DB, CONSENSUS> {
     /// chains and present data
     pub chains: HashMap<ChainId, Chain>,
@@ -55,7 +57,7 @@ pub struct BlockchainTree<DB, CONSENSUS> {
     pub block_indices: BlockIndices,
     /// Depth after we can prune blocks from chains and be sure that there will not be pending
     /// blocks.
-    pub finalization_block: BlockNumber,
+    pub finalized_block: BlockNumber,
     /// Max chain height. Number of blocks that side chain can have.
     pub max_chain_length: u64,
     /// Needs db to save sidechain, do reorgs and push new block to canonical chain that is inside
@@ -63,60 +65,6 @@ pub struct BlockchainTree<DB, CONSENSUS> {
     pub db: DB,
     /// Consensus
     pub consensus: CONSENSUS,
-}
-
-/// Internal indices of the block.
-#[derive(Default)]
-pub struct BlockIndices {
-    /// Index needed when discarding the chain, so we can remove connected chains from tree.
-    /// NOTE: It contains just a blocks that are forks as a key and not all blocks.
-    pub fork_to_child: HashMap<BlockHash, HashSet<BlockHash>>,
-    /// Block number to block hash, used to flush block.
-    pub number_to_block: HashMap<BlockNumber, BlockHash>,
-    /// Canonical chain. Contains N number (depends on `finalization_depth`) of blocks  
-    pub canonical_chain: BTreeMap<BlockNumber, BlockHash>,
-    /// Block hashes and side chain they belong
-    pub blocks_to_chain: HashMap<BlockHash, ChainId>,
-    /* Add additional indices if needed as in tx hash index to block */
-}
-
-impl BlockIndices {
-    /// Insert block to chain and fork child indices of the new chail
-    pub fn insert_chain(&mut self, chain_id: ChainId, chain: &Chain) {
-        // add block -> chain_id index
-        self.blocks_to_chain.extend(chain.blocks.iter().map(|h| (h.hash(), chain_id)));
-        let first = chain.first();
-        // add parent block -> block index
-        self.fork_to_child.entry(first.parent_hash).or_default().insert(first.hash());
-    }
-
-    /// get block chain id
-    pub fn get_block_chain_id(&self, block: &BlockHash) -> Option<ChainId> {
-        self.blocks_to_chain.get(block).cloned()
-    }
-
-    /// Used for finalization of
-    pub fn finalize_canonical_blocks(&mut self, block_number: &BlockNumber) -> Vec<ChainId> {
-        let mut finalized_blocks = self.canonical_chain.split_off(&(block_number + 1));
-
-        core::mem::swap(&mut finalized_blocks, &mut self.canonical_chain);
-        //finalized_blocks.into_iter().map(|(number,hash)|
-        // self.fork_to_child.remove(hash)).filter()
-
-        Vec::new()
-    }
-
-    /// get canonical hash
-    pub fn canonical_hash(&self, block_number: &BlockNumber) -> Option<BlockHash> {
-        self.canonical_chain.get(block_number).cloned()
-    }
-
-    /// get canonical tip
-    pub fn canonical_tip(&self) -> BlockJoint {
-        let (&number, &hash) =
-            self.canonical_chain.last_key_value().expect("There is always the canonical chain");
-        BlockJoint { number, hash }
-    }
 }
 
 impl<DB: Database, CONSENSUS: Consensus> BlockchainTree<DB, CONSENSUS> {
@@ -153,37 +101,57 @@ impl<DB: Database, CONSENSUS: Consensus> BlockchainTree<DB, CONSENSUS> {
     /// DONE
     /// Insert block inside tree
     pub fn insert_block(&mut self, block: SealedBlock) -> Result<(), Error> {
+        // check if block number is inside pending block slide
+        if block.number <= self.finalized_block {
+            return Err(ExecError::PendingBlockIsFinalized {
+                block_number: block.number,
+                block_hash: block.hash(),
+                last_finalized: self.finalized_block,
+            }
+            .into());
+        }
+
+        // we will not even try to insert blocks that are too far in future.
+        if block.number > self.finalized_block + self.max_chain_length {
+            return Err(ExecError::PendingBlockIsInFuture {
+                block_number: block.number,
+                block_hash: block.hash(),
+                last_finalized: self.finalized_block,
+            }
+            .into());
+        }
+
         // check if block parent can be found in Tree
         if let Some(parent_chain) = self.block_indices.get_block_chain_id(&block.parent_hash) {
-            self.join_block_to_chain(block.clone(), parent_chain)?;
-        // if not found, check if it can be found inside canonical chain aka db.
-        } else if let Some(parent) =
-            ShareableDatabase::new(&self.db).header(&block.parent_hash).ok().flatten()
-        {
-            // create new chain that points to that block
-            let chain =
-                Chain::new_canonical_joint(block.clone(), &parent, &self.db, &self.consensus)?;
-            self.insert_chain(chain);
-        } else {
-            // NOTE: fetch parent from p2p or discard if no parent is present.
-            // see how to handle recovery after this as we could receive this block
-            // in `make_canonical` function, this could be a trigger to initiate syncing.
+            let _ = self.join_block_to_chain(block.clone(), parent_chain)?;
+            self.db.tx_mut()?.put::<tables::PendingBlocks>(block.hash(), block.unseal())?;
             return Ok(())
         }
-        let block_hash = block.hash();
-        let unsealed_block = block.unseal();
-        self.db.tx_mut()?.put::<tables::PendingBlocks>(block_hash, unsealed_block)?;
+
+        // if not found, check if it can be found inside canonical chain.
+        if Some(block.parent_hash) == self.block_indices.canonical_hash(&(block.number - 1)) {
+            // create new chain that points to that block
+            let chain = Chain::new_canonical_joint(&block, &self.db, &self.consensus)?;
+            self.insert_chain(chain);
+            self.db.tx_mut()?.put::<tables::PendingBlocks>(block.hash(), block.unseal())?;
+            return Ok(())
+        }
+        // NOTE: Block dont have parent, and if we receive this block in `make_canonical` function
+        // this could be a trigger to initiate syncing, as we are missing parent.
         Ok(())
     }
 
-    /// TODO
-    pub fn finalize_block(&mut self, finalized_block_num: BlockNumber) -> Result<(), ()> {
-        // iter
+    // DONE
+    /// Do finalization of blocks. Remove them from tree
+    pub fn finalize_block(&mut self, finalized_block: BlockNumber) {
+        let mut remove_chains = self.block_indices.finalize_canonical_blocks(&finalized_block);
 
-        //let filtered_chains = self.chains.
-
-        //self.finalization_block = finalized_block_num
-        Ok(())
+        while let Some(chain_id) = remove_chains.first() {
+            if let Some(chain) = self.chains.remove(chain_id) {
+                remove_chains.extend(self.block_indices.remove_chain(&chain));
+            }
+        }
+        self.finalized_block = finalized_block;
     }
 
     /// DONE
@@ -249,6 +217,7 @@ impl<DB: Database, CONSENSUS: Consensus> BlockchainTree<DB, CONSENSUS> {
         Ok(())
     }
 
+    /// TODO
     /// Commit chain for it to become canonical. Assume we are doing pending operation to db.
     fn commit_canonical(&mut self, _chain: Chain) -> Result<(), ()> {
         // update self.block_indices
@@ -257,6 +226,7 @@ impl<DB: Database, CONSENSUS: Consensus> BlockchainTree<DB, CONSENSUS> {
         Ok(())
     }
 
+    /// TODO
     /// Revert canonical blocks from database and insert them to pending table
     /// Revert should be non inclusive, and revert_until should stay in db.
     /// Return the chain that represent reverted canonical blocks.

@@ -9,7 +9,7 @@ pub type ChainSubState = bool;
 /// Side chain that contain it state and connect to block found in canonical chain.
 #[derive(Default, Clone)]
 pub struct Chain {
-    /// Pendint state
+    /// Pending state
     /// NOTE: This will be HashMap<Address,Account> etc.
     pub pending_state: ChainSubState,
     /// Changesets for block and transaction.
@@ -67,8 +67,7 @@ impl Chain {
     /// If parent block is the tip mark chan joint as [`BlockJoint::CanonicalLatest`]
     /// if not, use [`BlockJoint::Canonical`]
     pub fn new_canonical_joint<PROVIDER, CONSENSUS: Consensus>(
-        _block: SealedBlock,
-        _parent: &Header,
+        _block: &SealedBlock,
         _provider: &PROVIDER,
         _consensus: &CONSENSUS,
     ) -> Result<Self, Error> {
