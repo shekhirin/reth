@@ -11,8 +11,8 @@ pub struct BlockIndices {
     /// NOTE: It contains just a blocks that are forks as a key and not all blocks.
     pub fork_to_child: HashMap<BlockHash, HashSet<BlockHash>>,
     /// Canonical chain. Contains N number (depends on `finalization_depth`) of blocks.
-    /// These blocks are found in fork_to_child but not inside `blocks_to_chain` or `number_to_block`
-    /// as those are chain specific indices.
+    /// These blocks are found in fork_to_child but not inside `blocks_to_chain` or
+    /// `number_to_block` as those are chain specific indices.
     pub canonical_chain: BTreeMap<BlockNumber, BlockHash>,
     /// Block hashes and side chain they belong
     pub blocks_to_chain: HashMap<BlockHash, ChainId>,

@@ -46,7 +46,8 @@ use self::block_indices::BlockIndices;
 /// main functions:
 /// * insert_block: insert block inside tree. Execute it and save it to database.
 /// * finalize_block: Flush chain that joins to finalized block.
-/// * make_canonical: Check if we have the hash of block that we want to finalize and commit it to db.
+/// * make_canonical: Check if we have the hash of block that we want to finalize and commit it to
+///   db.
 /// Do reorg if needed
 pub struct BlockchainTree<DB, CONSENSUS> {
     /// chains and present data
@@ -108,7 +109,7 @@ impl<DB: Database, CONSENSUS: Consensus> BlockchainTree<DB, CONSENSUS> {
                 block_hash: block.hash(),
                 last_finalized: self.finalized_block,
             }
-            .into());
+            .into())
         }
 
         // we will not even try to insert blocks that are too far in future.
@@ -118,7 +119,7 @@ impl<DB: Database, CONSENSUS: Consensus> BlockchainTree<DB, CONSENSUS> {
                 block_hash: block.hash(),
                 last_finalized: self.finalized_block,
             }
-            .into());
+            .into())
         }
 
         // check if block parent can be found in Tree
