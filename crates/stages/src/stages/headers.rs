@@ -1,7 +1,4 @@
-use crate::{
-    db::Transaction, DatabaseIntegrityError, ExecInput, ExecOutput, Stage, StageError, StageId,
-    UnwindInput, UnwindOutput,
-};
+use crate::{ExecInput, ExecOutput, Stage, StageError, StageId, UnwindInput, UnwindOutput};
 use futures_util::StreamExt;
 use reth_db::{
     cursor::{DbCursorRO, DbCursorRW},
@@ -12,9 +9,11 @@ use reth_db::{
 };
 use reth_interfaces::{
     consensus::{Consensus, ForkchoiceState},
+    db::DatabaseIntegrityError,
     p2p::headers::downloader::{HeaderDownloader, SyncTarget},
 };
 use reth_primitives::{BlockNumber, Header, SealedHeader};
+use reth_provider::Transaction;
 use std::sync::Arc;
 use tracing::*;
 

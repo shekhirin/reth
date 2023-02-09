@@ -1,6 +1,6 @@
 use crate::{
-    db::Transaction, exec_or_return, ExecAction, ExecInput, ExecOutput, Stage, StageError, StageId,
-    UnwindInput, UnwindOutput,
+    exec_or_return, ExecAction, ExecInput, ExecOutput, Stage, StageError, StageId, UnwindInput,
+    UnwindOutput,
 };
 use itertools::Itertools;
 use rayon::prelude::*;
@@ -12,6 +12,7 @@ use reth_db::{
     Error as DbError,
 };
 use reth_primitives::TxNumber;
+use reth_provider::Transaction;
 use std::fmt::Debug;
 use thiserror::Error;
 use tracing::*;

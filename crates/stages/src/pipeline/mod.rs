@@ -1,9 +1,8 @@
-use crate::{
-    db::Transaction, error::*, ExecInput, ExecOutput, Stage, StageError, StageId, UnwindInput,
-};
+use crate::{error::*, ExecInput, ExecOutput, Stage, StageError, StageId, UnwindInput};
 use reth_db::database::Database;
 use reth_interfaces::sync::{SyncState, SyncStateUpdater};
 use reth_primitives::BlockNumber;
+use reth_provider::Transaction;
 use std::{
     fmt::{Debug, Formatter},
     ops::Deref,
@@ -390,7 +389,7 @@ mod tests {
     use crate::{StageId, UnwindOutput};
     use assert_matches::assert_matches;
     use reth_db::mdbx::{self, test_utils, EnvKind};
-    use reth_interfaces::{consensus, sync::NoopSyncStateUpdate};
+    use reth_interfaces::{consensus, db::DatabaseIntegrityError, sync::NoopSyncStateUpdate};
     use tokio_stream::StreamExt;
     use utils::TestStage;
 

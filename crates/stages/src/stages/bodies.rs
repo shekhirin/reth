@@ -1,6 +1,6 @@
 use crate::{
-    db::Transaction, exec_or_return, DatabaseIntegrityError, ExecAction, ExecInput, ExecOutput,
-    Stage, StageError, StageId, UnwindInput, UnwindOutput,
+    exec_or_return, ExecAction, ExecInput, ExecOutput, Stage, StageError, StageId, UnwindInput,
+    UnwindOutput,
 };
 use futures_util::TryStreamExt;
 use reth_db::{
@@ -12,8 +12,10 @@ use reth_db::{
 };
 use reth_interfaces::{
     consensus::Consensus,
+    db::DatabaseIntegrityError,
     p2p::bodies::{downloader::BodyDownloader, response::BlockResponse},
 };
+use reth_provider::Transaction;
 use std::sync::Arc;
 use tracing::*;
 

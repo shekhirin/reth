@@ -1,6 +1,6 @@
 use crate::{
-    db::Transaction, exec_or_return, DatabaseIntegrityError, ExecAction, ExecInput, ExecOutput,
-    Stage, StageError, StageId, UnwindInput, UnwindOutput,
+    exec_or_return, ExecAction, ExecInput, ExecOutput, Stage, StageError, StageId, UnwindInput,
+    UnwindOutput,
 };
 use reth_db::{
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO},
@@ -13,10 +13,11 @@ use reth_executor::{
     execution_result::AccountChangeSet,
     revm_wrap::{State, SubState},
 };
+use reth_interfaces::db::DatabaseIntegrityError;
 use reth_primitives::{
     Address, Block, ChainSpec, Hardfork, Header, StorageEntry, H256, MAINNET, U256,
 };
-use reth_provider::LatestStateProviderRef;
+use reth_provider::{LatestStateProviderRef, Transaction};
 use std::fmt::Debug;
 use tracing::*;
 
