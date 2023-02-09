@@ -14,6 +14,9 @@ pub use historical::{HistoricalStateProvider, HistoricalStateProviderRef};
 mod latest;
 pub use latest::{LatestStateProvider, LatestStateProviderRef};
 
+mod chain;
+pub use chain::ChainState;
+
 /// A common provider that fetches data from a database.
 ///
 /// This provider implements most provider or provider factory traits.
